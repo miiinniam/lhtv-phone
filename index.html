@@ -74,7 +74,6 @@
 <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 (function () {
-  var BROKER = 'wss://broker.hivemq.com:8884/mqtt';
   var TOPIC = 'lhtv5/req/';
 
   var $ = function (id) { return document.getElementById(id); };
@@ -106,23 +105,43 @@
     return;
   }
 
+  // 三家公共 broker 同时连、同时发：电视那边同时订阅三家，任意一家通就能到。
+  // 只挂一家的话，某些电视 ROM 或运营商网络会把它挡掉，表现就是"扫码输入用不了"。
+  var BROKERS = [
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://test.mosquitto.org:8081'
+  ];
+
   setDot('wait', '正在连接中继…');
 
-  var client = mqtt.connect(BROKER, {
-    clientId: 'lhtv-phone-' + Math.random().toString(16).slice(2, 10),
-    keepalive: 30,
-    reconnectPeriod: 3000,
-    connectTimeout: 12000,
-    clean: true
+  var clients = BROKERS.map(function (url) {
+    var c = mqtt.connect(url, {
+      clientId: 'lhtv-phone-' + Math.random().toString(16).slice(2, 10),
+      keepalive: 30,
+      reconnectPeriod: 4000,
+      connectTimeout: 12000,
+      clean: true
+    });
+    c.on('connect', refresh);
+    c.on('reconnect', refresh);
+    c.on('close', refresh);
+    c.on('error', function (e) { if (window.console) console.warn(url, e && e.message); refresh(); });
+    return c;
   });
 
-  client.on('connect', function () { setDot('on', '已就绪，可以发送'); });
-  client.on('reconnect', function () { setDot('wait', '重连中…'); });
-  client.on('close', function () { setDot('wait', '连接断开，正在重试'); });
-  client.on('error', function (e) {
-    setDot('', '连接失败，检查网络后刷新');
-    console.warn(e && e.message);
-  });
+  function live() {
+    return clients.filter(function (c) { return c.connected; });
+  }
+
+  function refresh() {
+    var n = live().length;
+    if (n > 0) setDot('on', '已就绪（' + n + '/3 中继）· 可以发送');
+    else setDot('wait', '正在连接中继…（' + clients.length + ' 家）');
+  }
+
+  setInterval(refresh, 3000);
+  refresh();
 
   $('f').addEventListener('submit', function (e) {
     e.preventDefault();
@@ -134,24 +153,30 @@
     if (!v) {
       res.className = 'res bad'; res.textContent = '先写一句想看的'; text.focus(); return;
     }
-    if (!client.connected) {
-      res.className = 'res warn'; res.textContent = '还在连中继，等一秒再点'; return;
+    var ups = live();
+    if (!ups.length) {
+      res.className = 'res warn'; res.textContent = '还在连中继，等一两秒再点'; return;
     }
     btn.disabled = true;
     res.className = 'res'; res.textContent = '正在发送…';
     var payload = JSON.stringify({ text: v, ts: Date.now(), v: 1 });
-    client.publish(TOPIC + c, payload, { qos: 0, retain: false }, function (err) {
-      btn.disabled = false;
-      if (err) {
-        res.className = 'res bad'; res.textContent = '发送失败，重试一次';
-        return;
-      }
-      res.className = 'res ok';
-      res.textContent = '已发送，抬头看电视';
-      text.value = '';
+    var failed = 0;
+    ups.forEach(function (cl) {
+      cl.publish(TOPIC + c, payload, { qos: 0, retain: false }, function (err) {
+        if (err) failed++;
+      });
     });
+    setTimeout(function () {
+      btn.disabled = false;
+      if (failed === ups.length) {
+        res.className = 'res bad'; res.textContent = '发送失败，重试一次';
+      } else {
+        res.className = 'res ok';
+        res.textContent = '已发送（' + (ups.length - failed) + '/' + ups.length + ' 中继），抬头看电视';
+        text.value = '';
+      }
+    }, 600);
   });
-})();
 </script>
 </body>
 </html>
