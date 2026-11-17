@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101015">
+<title>LH TV · AI 找片</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:#101015;color:#F4F5F7;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;
+       -webkit-font-smoothing:antialiased;min-height:100vh}
+  .w{max-width:520px;margin:0 auto;padding:28px 20px 48px}
+  .brand{font-size:11px;letter-spacing:.34em;color:#C8A96A;margin-bottom:8px;font-weight:600}
+  h1{font-size:24px;font-weight:300;margin:0 0 6px;letter-spacing:-.01em}
+  .sub{font-size:13px;color:#8A909B;line-height:1.65;margin:0 0 22px}
+  label{display:block;font-size:12px;color:#8A909B;margin:0 0 7px;letter-spacing:.02em}
+  input,textarea{width:100%;padding:14px 15px;border-radius:13px;font-size:16px;
+       background:#191920;color:#F4F5F7;border:1px solid #2A2A33;font-family:inherit;
+       transition:border-color .18s ease}
+  input{letter-spacing:.3em;font-size:21px;text-align:center;font-variant-numeric:tabular-nums}
+  textarea{height:108px;line-height:1.55;resize:none}
+  input:focus,textarea:focus{outline:none;border-color:#C8A96A}
+  .row{margin-bottom:16px}
+  button{width:100%;margin-top:16px;padding:16px;border:0;border-radius:13px;
+       background:#C8A96A;color:#0B0B0D;font-size:16px;font-weight:600;font-family:inherit;
+       transition:transform .12s ease,background .18s ease}
+  button:active{background:#B39758;transform:scale(.988)}
+  button[disabled]{opacity:.5}
+  .res{margin-top:16px;font-size:13.5px;min-height:21px;color:#9AA0AB;line-height:1.6}
+  .ok{color:#8FD6A0}.bad{color:#E08C8C}.warn{color:#D8B871}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+  .chip{border:1px solid #2F2F38;border-radius:999px;padding:8px 13px;font-size:12.5px;
+       color:#A8AEB8;background:transparent;font-family:inherit;cursor:pointer}
+  .chip:active{border-color:#C8A96A;color:#F4F5F7}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#5F646D;
+       margin-right:7px;vertical-align:middle;transition:background .2s ease}
+  .dot.on{background:#8FD6A0}.dot.wait{background:#D8B871}
+  .status{margin-top:26px;font-size:11.5px;color:#5F646D;line-height:1.8;
+       display:flex;align-items:center;flex-wrap:wrap}
+  .foot{margin-top:18px;font-size:11px;color:#4E535B;line-height:1.8}
+</style>
+</head>
+<body>
+<div class="w">
+  <div class="brand">LH TV</div>
+  <h1>AI 找片</h1>
+  <p class="sub">电视上打开 AI 找片 → 点「手机」。填电视显示的 6 位码，说一句想看的，点发送。任何网络都行。</p>
+
+  <form id="f">
+    <div class="row">
+      <label for="c">电视上的 6 位码</label>
+      <input id="c" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="000000">
+    </div>
+    <div class="row">
+      <label for="t">想看什么</label>
+      <textarea id="t" maxlength="200" placeholder="今晚想看点轻松不费脑的，别太吵"></textarea>
+    </div>
+    <div class="chips">
+      <button type="button" class="chip" data-t="推荐几部今晚适合看的电影">今晚看什么</button>
+      <button type="button" class="chip" data-t="找几部高分的悬疑片">高分悬疑</button>
+      <button type="button" class="chip" data-t="找几部适合和孩子一起看的动画电影">适合小孩</button>
+      <button type="button" class="chip" data-t="我最近在追的剧有更新吗">追的更新了</button>
+    </div>
+    <button id="b" type="submit">发送到电视</button>
+  </form>
+
+  <div class="res" id="r"></div>
+  <div class="status"><span class="dot" id="d"></span><span id="s">正在连接…</span></div>
+  <div class="foot">6 位码只在电视打开二维码后 5 分钟内有效 · 发送后抬头看电视</div>
+</div>
+
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script>
+(function () {
+  var BROKER = 'wss://broker.hivemq.com:8884/mqtt';
+  var TOPIC = 'lhtv5/req/';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var code = $('c'), text = $('t'), btn = $('b'), res = $('r'), dot = $('d'), stat = $('s');
+
+  // Prefill from the QR (?c=123456) so scanning is enough; typing the code also works.
+  var q = new URLSearchParams(location.search).get('c') || '';
+  if (/^\d{6}$/.test(q)) { code.value = q; }
+
+  document.querySelectorAll('.chip').forEach(function (el) {
+    el.addEventListener('click', function () {
+      text.value = el.getAttribute('data-t');
+      text.focus();
+    });
+  });
+
+  code.addEventListener('input', function () {
+    code.value = code.value.replace(/\D/g, '').slice(0, 6);
+    if (code.value.length === 6) { text.focus(); }
+  });
+
+  function setDot(cls, msg) {
+    dot.className = 'dot' + (cls ? ' ' + cls : '');
+    stat.textContent = msg;
+  }
+
+  if (typeof mqtt === 'undefined') {
+    setDot('', '页面脚本没加载成功，检查网络后刷新');
+    return;
+  }
+
+  setDot('wait', '正在连接中继…');
+
+  var client = mqtt.connect(BROKER, {
+    clientId: 'lhtv-phone-' + Math.random().toString(16).slice(2, 10),
+    keepalive: 30,
+    reconnectPeriod: 3000,
+    connectTimeout: 12000,
+    clean: true
+  });
+
+  client.on('connect', function () { setDot('on', '已就绪，可以发送'); });
+  client.on('reconnect', function () { setDot('wait', '重连中…'); });
+  client.on('close', function () { setDot('wait', '连接断开，正在重试'); });
+  client.on('error', function (e) {
+    setDot('', '连接失败，检查网络后刷新');
+    console.warn(e && e.message);
+  });
+
+  $('f').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var c = (code.value || '').trim();
+    var v = (text.value || '').trim();
+    if (c.length !== 6) {
+      res.className = 'res bad'; res.textContent = '先填电视上显示的 6 位码'; code.focus(); return;
+    }
+    if (!v) {
+      res.className = 'res bad'; res.textContent = '先写一句想看的'; text.focus(); return;
+    }
+    if (!client.connected) {
+      res.className = 'res warn'; res.textContent = '还在连中继，等一秒再点'; return;
+    }
+    btn.disabled = true;
+    res.className = 'res'; res.textContent = '正在发送…';
+    var payload = JSON.stringify({ text: v, ts: Date.now(), v: 1 });
+    client.publish(TOPIC + c, payload, { qos: 0, retain: false }, function (err) {
+      btn.disabled = false;
+      if (err) {
+        res.className = 'res bad'; res.textContent = '发送失败，重试一次';
+        return;
+      }
+      res.className = 'res ok';
+      res.textContent = '已发送，抬头看电视';
+      text.value = '';
+    });
+  });
+})();
+</script>
+</body>
+</html>
